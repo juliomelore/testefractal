@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Fractal Arts — AR</title>
+
+<!-- Bibliotecas locais (nenhuma dependência de CDN) -->
+<script src="vendor/aframe.min.js"></script>
+<script src="vendor/mindar-image-aframe.prod.js"></script>
+<script src="js/ar-components.js"></script>
+<script src="js/pulso-fractal.js"></script>
+<script src="assets/pulso-curvas.js"></script>
+<script src="assets/rafa.glb.js"></script>
+<script src="assets/targets.mind.js"></script>
+<script src="js/inline-assets.js"></script>
+
+<style>
+  /* GOTCHA #1 do web-AR: qualquer fundo opaco em html/body é pintado POR CIMA
+     do <video> da câmera (que o MindAR insere em z-index:-2) => tela preta. */
+  html, body { background: transparent !important; margin: 0; padding: 0;
+               overflow: hidden; width: 100%; height: 100%; }
+  * { -webkit-tap-highlight-color: transparent; }
+
+  /* GOTCHA #2: a UI HTML fica ATRÁS do <canvas> do A-Frame sem z-index alto. */
+  .ui { position: fixed; z-index: 20; pointer-events: none;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+
+  #scan {
+    inset: 0; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 14px; text-align: center; padding: 24px;
+    color: #fff; text-shadow: 0 2px 12px rgba(0,0,0,.85);
+  }
+  #scan .frame {
+    width: min(62vw, 260px); aspect-ratio: 1; border: 2px dashed rgba(255,255,255,.85);
+    border-radius: 14px; animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity:.45; transform:scale(1);} 50% { opacity:1; transform:scale(1.03);} }
+  #scan p { margin: 0; font-size: 15px; line-height: 1.45; max-width: 300px; }
+  #scan small { opacity: .8; font-size: 12px; }
+
+  #bar {
+    left: 0; right: 0; bottom: 0; padding: 12px 12px calc(12px + env(safe-area-inset-bottom));
+    display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;
+  }
+  #bar button {
+    pointer-events: auto; cursor: pointer;
+    background: rgba(18,18,18,.72); color: #fff; border: 1px solid rgba(255,255,255,.28);
+    border-radius: 999px; padding: 11px 16px; font-size: 14px; font-weight: 600;
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    min-width: 46px; line-height: 1;
+  }
+  #bar button:active { background: rgba(255,255,255,.9); color: #111; }
+
+  #msg {
+    inset: 0; display: none; align-items: center; justify-content: center; padding: 32px;
+    background: #111; color: #fff; text-align: center; font-size: 15px; line-height: 1.6;
+  }
+  #msg.show { display: flex; }
+
+  .hide { display: none !important; }
+</style>
+</head>
+<body>
+
+<!-- ============================ CENA AR ============================ -->
+<a-scene
+  metal-env="intensity: 1.15"
+  mindar-image="imageTargetSrc: assets/targets.mind;
+                filterMinCF: 0.0001; filterBeta: 0.001;
+                missTolerance: 8; warmupTolerance: 3;
+                uiScanning: no; uiLoading: no; uiError: no"
+  color-space="sRGB"
+  renderer="colorManagement: true; physicallyCorrectLights: true; antialias: true; alpha: true"
+  vr-mode-ui="enabled: false"
+  device-orientation-permission-ui="enabled: false"
+  embedded>
+
+  <a-camera position="0 0 0" look-controls="enabled: false" cursor="fuse: false"></a-camera>
+
+  <!-- Luzes: o modelo é preto brilhante; ambiente alto + duas direcionais
+       evitam que ele vire uma silhueta chapada sobre a imagem. -->
+  <a-entity light="type: ambient; color: #ffffff; intensity: 1.1"></a-entity>
+  <a-entity light="type: directional; color: #ffffff; intensity: 1.6" position="1 1 2"></a-entity>
+  <a-entity light="type: directional; color: #ffffff; intensity: 0.6" position="-1 -0.5 1"></a-entity>
+
+  <!-- targetIndex: 0 => o único alvo dentro de targets.mind.
+       O plano do alvo tem largura 1 e altura = altura/largura da imagem,
+       centrado na origem, com +Z saindo da imagem em direção à câmera. -->
+  <a-entity id="anchor" mindar-image-target="targetIndex: 0">
+    <a-entity id="holder">
+      <a-entity
+        id="model"
+        inline-gltf
+        fit-to-target="widthFraction: 0.82; lift: 0.004; offsetY: -0.36"
+        clip-player="loop: true; timeScale: 1"
+        pulso-fractal></a-entity>
+    </a-entity>
+  </a-entity>
+</a-scene>
+
+<!-- ============================ UI FIXA ============================ -->
+<div id="scan" class="ui">
+  <div class="frame"></div>
+  <p>Aponte a câmera para a imagem-alvo</p>
+  <small>Mantenha a imagem inteira e bem iluminada dentro do quadro</small>
+</div>
+
+<div id="bar" class="ui hide">
+  <button id="btnPlay"  aria-label="Pausar/continuar">⏸</button>
+  <button id="btnReset" aria-label="Reiniciar animação">↺</button>
+  <button id="btnMinus" aria-label="Diminuir">−</button>
+  <button id="btnPlus"  aria-label="Aumentar">+</button>
+</div>
+
+<div id="msg" class="ui"><div id="msgText"></div></div>
+
+<script>
+/* ------------------------------------------------------------------
+   Ligações de UI
+------------------------------------------------------------------- */
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const scene  = document.querySelector('a-scene');
+  const anchor = $('anchor');
+  const model  = $('model');
+  const scan   = $('scan');
+  const bar    = $('bar');
+
+  const clip  = () => model.components['clip-player'];
+  const fit   = () => model.components['fit-to-target'];
+  const pulso = () => model.components['pulso-fractal'];
+
+  anchor.addEventListener('targetFound', () => {
+    scan.classList.add('hide');
+    bar.classList.remove('hide');
+    if (clip()) clip().setActive(true);
+    if (pulso()) pulso().setActive(true);
+  });
+  anchor.addEventListener('targetLost', () => {
+    scan.classList.remove('hide');
+    bar.classList.add('hide');
+    if (clip()) clip().setActive(false);
+    if (pulso()) pulso().setActive(false);
+  });
+
+  $('btnPlay').addEventListener('click', () => {
+    if (!clip()) return;
+    const paused = clip().toggle();
+    if (pulso()) pulso().paused = paused;
+    $('btnPlay').textContent = paused ? '▶' : '⏸';
+  });
+  $('btnReset').addEventListener('click', () => {
+    if (clip()) clip().reset();
+    if (pulso()) pulso().reset();
+  });
+  $('btnMinus').addEventListener('click', () => { if (fit()) fit().setUserScale(1 / 1.2); });
+  $('btnPlus').addEventListener('click',  () => { if (fit()) fit().setUserScale(1.2); });
+
+  // ---------------------------------------------------------------------
+  // Diagnóstico ANTES de tentar a câmera. Sem isto o sintoma é sempre o
+  // mesmo — tela preta — e a causa pode ser qualquer uma de quatro.
+  // ---------------------------------------------------------------------
+  const proto = location.protocol;
+  const host  = location.hostname;
+  const local = (host === 'localhost' || host === '127.0.0.1' || host === '::1');
+
+  // file:// É contexto seguro no Chrome (isSecureContext === true) e a câmera
+  // funciona ali — o que quebrava eram os assets, agora embutidos em base64.
+  // Só http:// em endereço de rede é que realmente não recebe a câmera.
+  if (!window.isSecureContext && !local && proto !== 'file:') {
+    showMsg(
+      '<b>Esta página está em HTTP, não HTTPS.</b><br><br>' +
+      'O navegador só entrega a câmera em conexão segura. Endereços de rede local ' +
+      '(como <code>192.168.x.x</code>) não valem — precisam de HTTPS.<br><br>' +
+      'Soluções rápidas: <code>cloudflared tunnel --url http://localhost:8080</code> ' +
+      'ou <code>ngrok http 8080</code>, que geram uma URL HTTPS temporária.'
+    );
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showMsg(
+      '<b>Este navegador não expõe a câmera para páginas.</b><br><br>' +
+      'É o caso dos navegadores embutidos em apps (Instagram, WhatsApp, LinkedIn). ' +
+      'Toque nos três pontinhos e escolha <b>"Abrir no navegador"</b> — Chrome ou Safari.'
+    );
+    return;
+  }
+
+  // Pedimos a câmera nós mesmos primeiro: assim o motivo da recusa aparece
+  // com nome, em vez de virar uma tela preta silenciosa.
+  navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+    .then((s) => { s.getTracks().forEach((t) => t.stop()); })
+    .catch((err) => {
+      const n = err && err.name;
+      if (n === 'NotAllowedError') {
+        showMsg('<b>Permissão de câmera negada.</b><br><br>' +
+          'Toque no cadeado (ou no ícone de câmera) ao lado do endereço e autorize a ' +
+          'câmera para este site, depois recarregue a página.');
+      } else if (n === 'NotFoundError' || n === 'OverconstrainedError') {
+        showMsg('<b>Nenhuma câmera encontrada</b> neste aparelho.');
+      } else if (n === 'NotReadableError') {
+        showMsg('<b>A câmera está ocupada por outro aplicativo.</b><br><br>' +
+          'Feche o app que está usando a câmera e recarregue.');
+      } else {
+        showMsg('<b>Não consegui abrir a câmera.</b><br><br>Erro: ' + n);
+      }
+    });
+
+  let started = false;
+  scene.addEventListener('arReady', () => { started = true; console.log('[AR] pronto'); });
+  scene.addEventListener('arError', () => showMsg(
+    'O MindAR não conseguiu iniciar.<br><br>Confira se <code>assets/targets.mind</code> ' +
+    'está junto da página e recarregue.'
+  ));
+  setTimeout(() => {
+    if (!started && !$('msg').classList.contains('show')) {
+      showMsg('A câmera não iniciou em 12 segundos.<br><br>Abra o Console (F12) e me mande o erro.');
+    }
+  }, 12000);
+
+  function showMsg(html) { $('msgText').innerHTML = html; $('msg').classList.add('show'); }
+})();
+</script>
+</body>
+</html>

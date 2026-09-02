@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fractal Arts — prévia (duplo clique, sem servidor)</title>
+
+<!--
+  Esta página foi feita para abrir com DUPLO CLIQUE, sem servidor nenhum.
+
+  Por que a versão anterior ficava carregando para sempre: em file:// o
+  navegador barra TRÊS coisas de uma vez:
+    1. XHR/fetch de arquivos locais  -> o .glb nunca chega;
+    2. blob: URLs criadas em página de origem "null" -> "Failed to fetch";
+    3. <img> local usada como textura WebGL -> SecurityError (imagem "suja").
+
+  A solução aqui, então:
+    - o modelo vem em base64 (assets/rafa.glb.js), carregado por <script src>
+      (isso o navegador PERMITE), e é entregue ao GLTFLoader.parse() em memória
+      — sem fetch, sem blob, sem servidor;
+    - a imagem-alvo vem em base64 (assets/target.png.js) e vira um data: URI,
+      que não é considerado cross-origin e portanto não contamina a textura.
+-->
+
+<script src="vendor/aframe.min.js"></script>
+<script src="js/ar-components.js"></script>
+<script src="js/pulso-fractal.js"></script>
+<script src="assets/pulso-curvas.js"></script>
+<script src="assets/rafa.glb.js"></script>
+<script src="assets/target.png.js"></script>
+<script src="js/inline-assets.js"></script>
+
+<script>
+/* Órbita mínima só para a prévia (não faz parte da página AR). */
+AFRAME.registerComponent('mini-orbit', {
+  schema: { radius: { default: 1.25 }, yaw: { default: 0 }, pitch: { default: 12 } },
+  init: function () {
+    this.r = this.data.radius;
+    this.yaw = this.data.yaw * Math.PI / 180;
+    this.pitch = this.data.pitch * Math.PI / 180;
+    this.down = false;
+    const move = (dx, dy) => {
+      this.yaw -= dx * 0.006;
+      this.pitch = Math.max(-1.45, Math.min(1.45, this.pitch + dy * 0.006));
+      this.place();
+    };
+    document.addEventListener('mousedown', (e) => { this.down = true; this.px = e.clientX; this.py = e.clientY; });
+    document.addEventListener('mouseup', () => { this.down = false; });
+    document.addEventListener('mousemove', (e) => {
+      if (!this.down) return; move(e.clientX - this.px, e.clientY - this.py);
+      this.px = e.clientX; this.py = e.clientY;
+    });
+    document.addEventListener('touchstart', (e) => { this.px = e.touches[0].clientX; this.py = e.touches[0].clientY; }, { passive: true });
+    document.addEventListener('touchmove', (e) => {
+      move(e.touches[0].clientX - this.px, e.touches[0].clientY - this.py);
+      this.px = e.touches[0].clientX; this.py = e.touches[0].clientY;
+    }, { passive: true });
+    document.addEventListener('wheel', (e) => {
+      this.r = Math.max(0.3, Math.min(6, this.r * (1 + e.deltaY * 0.001))); this.place();
+    }, { passive: true });
+    this.place();
+  },
+  place: function () {
+    const o = this.el.object3D;
+    o.position.set(
+      this.r * Math.cos(this.pitch) * Math.sin(this.yaw),
+      this.r * Math.sin(this.pitch),
+      this.r * Math.cos(this.pitch) * Math.cos(this.yaw)
+    );
+    // Em um Group, lookAt() aponta o +Z para o alvo e a câmera filha olharia
+    // para trás. Montamos a rotação com a convenção de câmera à mão.
+    const m = new THREE.Matrix4().lookAt(o.position, new THREE.Vector3(0, 0, 0), o.up);
+    o.quaternion.setFromRotationMatrix(m);
+  }
+});
+</script>
+
+<style>
+  html, body { margin: 0; height: 100%; background: #d8d8d8; overflow: hidden;
+               font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #hint { position: fixed; z-index: 20; left: 0; right: 0; top: 0; padding: 10px 14px;
+          color: #222; background: rgba(255,255,255,.85); }
+  #status { position: fixed; z-index: 20; inset: 0; display: flex; align-items: center;
+            justify-content: center; text-align: center; padding: 32px; color: #444; }
+  #status.done { display: none; }
+  #status b { display: block; font-size: 16px; margin-bottom: 6px; color: #111; }
+</style>
+</head>
+<body>
+
+<div id="hint">
+  <b>Prévia sem câmera.</b> Mostra como o objeto 3D fica sobre a imagem-alvo.
+  Arraste para girar, role para aproximar. A animação roda em loop.
+</div>
+
+<div id="status"><div><b>Carregando o modelo…</b><span id="statusMsg"></span></div></div>
+
+<a-scene
+  metal-env="intensity: 1.15"
+  background="color: #d8d8d8"
+  renderer="colorManagement: true; physicallyCorrectLights: true; antialias: true"
+  vr-mode-ui="enabled: false"
+  loading-screen="enabled: false">
+
+  <a-entity light="type: ambient; color: #ffffff; intensity: 1.1"></a-entity>
+  <a-entity light="type: directional; color: #ffffff; intensity: 1.6" position="1 1 2"></a-entity>
+  <a-entity light="type: directional; color: #ffffff; intensity: 0.6" position="-1 -0.5 1"></a-entity>
+
+  <!-- Reproduz o anchor do MindAR: plano de largura 1, altura = proporção da
+       imagem, com +Z saindo da imagem em direção à câmera. -->
+  <a-entity id="anchor">
+    <a-plane id="targetPlane" width="1" height="0.94375" material="shader: flat; color: #ffffff"></a-plane>
+    <a-entity id="holder">
+      <a-entity id="model"
+        inline-gltf
+        fit-to-target="widthFraction: 0.82; lift: 0.004; offsetY: -0.36"
+        clip-player="loop: true; timeScale: 1"
+        pulso-fractal></a-entity>
+    </a-entity>
+  </a-entity>
+
+  <a-entity id="rig" mini-orbit="radius: 1.25; pitch: 12">
+    <a-entity camera="fov: 40" look-controls="enabled: false"></a-entity>
+  </a-entity>
+</a-scene>
+
+
+<script>
+(function () {
+  const status = document.getElementById('status');
+  const msg = document.getElementById('statusMsg');
+  const model = document.getElementById('model');
+
+  // Imagem-alvo como data: URI — não contamina a textura WebGL em file://.
+  if (window.__TARGET_PNG_B64) {
+    document.getElementById('targetPlane').setAttribute('material', {
+      shader: 'flat', src: 'data:image/png;base64,' + window.__TARGET_PNG_B64
+    });
+  }
+
+  model.addEventListener('model-loaded', function () {
+    status.classList.add('done');
+    const c = this.components['clip-player'];
+    if (c) c.setActive(true);   // na prévia o alvo está sempre "encontrado"
+    const pf = this.components['pulso-fractal'];
+    if (pf) pf.setActive(true);
+  });
+  model.addEventListener('inline-error', function (e) {
+    msg.textContent = 'Erro: ' + e.detail.why +
+      ' — descompacte o zip inteiro, mantendo as pastas assets/, js/ e vendor/.';
+  });
+
+  setTimeout(function () {
+    if (!status.classList.contains('done')) {
+      msg.textContent = 'Está demorando mais que o esperado — abra o Console (F12) e me mande o erro.';
+    }
+  }, 20000);
+})();
+</script>
+</body>
+</html>
